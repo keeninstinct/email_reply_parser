@@ -35,22 +35,24 @@ class EmailReplyParser
   # Public: Splits an email body into a list of Fragments.
   #
   # text - A String email body.
+  # from_address - from address of the email (optional)
   #
   # Returns an Email instance.
-  def self.read(text)
-    Email.new.read(text)
+  def self.read(text, from_address = "")
+    Email.new.read(text, from_address)
   end
 
   # Public: Get the text of the visible portions of the given email body.
   #
   # text - A String email body.
+  # from_address - from address of the email (optional)
   #
   # Returns a String.
-  def self.parse_reply(text)
-    self.read(text).visible_text
+  def self.parse_reply(text, from_address = "")
+    self.read(text, from_address).visible_text
   end
 
-  ### Emails
+   ### Emails
 
   # An Email instance represents a parsed body String.
   class Email
@@ -73,17 +75,22 @@ class EmailReplyParser
     # can check for 'On <date>, <author> wrote:' lines above quoted blocks.
     #
     # text - A String email body.
+    # from_address - from address of the email (optional)
     #
     # Returns this same Email instance.
-    def read(text)
+    def read(text, from_address = "")
       # in 1.9 we want to operate on the raw bytes
       text = text.dup.force_encoding('binary') if text.respond_to?(:force_encoding)
-
+      
+      # parse out the from name if one exists and save for use later
+      @from_name = parse_name_from_address(from_address)
+      
       # Check for multi-line reply headers. Some clients break up
       # the "On DATE, NAME <EMAIL> wrote:" line into multiple lines.
-      if text =~ /^(On(.+)wrote:)$/nm
-        # Remove all new lines from the reply header.
-        text.gsub! $1, $1.gsub("\n", " ")
+      if match = text.match(/^(On (.+)wrote:)$/m)
+        # Remove all new lines from the reply header. as long as we don't have any double newline
+        # if we do they we have grabbed something that is not actually a reply header
+        text.gsub! match[1], match[1].gsub("\n", " ") unless match[1] =~ /\n\n/
       end
 
       # The text is reversed initially due to the way we check for hidden
@@ -124,7 +131,20 @@ class EmailReplyParser
 
   private
     EMPTY = "".freeze
-    SIG_REGEX = /(--|__|\w-$)|(^(\w+\s*){1,3} #{"Sent from my".reverse}$)/n
+
+    # Parse a person's name from an e-mail address
+    #
+    # email - email address.
+    #
+    # Returns a String.
+    def parse_name_from_address(email)
+      match = email.match(/^["']*([\w\s]+)["']*\s*</)
+      unless match.nil?
+        match[1].strip.to_s
+      else
+        ""
+      end
+    end
 
     ### Line-by-Line Parsing
 
@@ -136,7 +156,7 @@ class EmailReplyParser
     # Returns nothing.
     def scan_line(line)
       line.chomp!("\n")
-      line.lstrip! unless line =~ SIG_REGEX
+      line.lstrip! unless signature_line?(line)
 
       # We're looking for leading `>`'s to see if this line is part of a
       # quoted Fragment.
@@ -145,7 +165,7 @@ class EmailReplyParser
       # Mark the current Fragment as a signature if the current line is empty
       # and the Fragment starts with a common signature indicator.
       if @fragment && line == EMPTY
-        if @fragment.lines.last =~ SIG_REGEX
+        if signature_line?(@fragment.lines.last)
           @fragment.signature = true
           finish_fragment
         end
@@ -174,6 +194,28 @@ class EmailReplyParser
     # Returns true if the line is a valid header, or false.
     def quote_header?(line)
       line =~ /^:etorw.*nO$/n
+    end
+
+    # Detects if a given line is the beginning of a signature
+    #
+    # line - A String line of text from the email.
+    #
+    # Returns true if the line is the beginning of a signature, or false.
+    def signature_line?(line)
+      regex = /(--|__|\w-$)|(^(\w+\s*){1,3} #{"Sent from my".reverse}$)/
+      signature_detected = line =~ regex
+      signature_detected = line_is_signature_name?(line) if !signature_detected
+      signature_detected
+    end
+
+    # Detects if the @from name is a big part of a given line and therefore the beginning of a signature
+    #
+    # line - A String line of text from the email.
+    #
+    # Returns true if @from_name is a big part of the line, or false.
+
+    def line_is_signature_name?(line)
+      @from_name != "" && (line =~ /#{@from_name.reverse}/) && ((@from_name.size.to_f / line.size) > 0.25)
     end
 
     # Builds the fragment string and reverses it, after all lines have been
